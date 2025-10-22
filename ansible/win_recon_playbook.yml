@@ -1,0 +1,89 @@
+---
+# win_recon_playbook.yml
+# Pushes WinReconReporter.ps1 to Windows targets, executes it, and fetches the output.
+# Save WinReconReporter.ps1 in the same directory as this playbook, or adjust the src path.
+
+- name: Run WinReconReporter on Windows targets
+  hosts: win_targets
+  gather_facts: no
+  vars:
+    # Remote locations on target
+    remote_script_dir: C:\Temp\winrecon
+    remote_output_dir: "{{ remote_script_dir }}\output"
+    ps_script: WinReconReporter.ps1
+
+    # Script arguments (escape quotes as needed). Example: disable zip -> -Zip:$false
+    # Default: create zipped output and keep files under remote_output_dir
+    script_args: "-OutDir `"$remote_output_dir`" -Zip:$true"
+
+    # Local directory on controller where outputs will be stored per host
+    local_fetch_base: "./retrieved"
+
+  tasks:
+
+    - name: Ensure remote script directory exists
+      ansible.windows.win_file:
+        path: "{{ remote_script_dir }}"
+        state: directory
+
+    - name: Copy WinReconReporter.ps1 to target
+      ansible.windows.win_copy:
+        src: "{{ ps_script }}"
+        dest: "{{ remote_script_dir }}\{{ ps_script }}"
+        force: yes
+
+    - name: Ensure remote output directory exists
+      ansible.windows.win_file:
+        path: "{{ remote_output_dir }}"
+        state: directory
+
+    - name: Execute the recon script (PowerShell)
+      ansible.windows.win_shell:
+        args:
+          executable: powershell.exe
+        chdir: "{{ remote_script_dir }}"
+        cmd: "powershell.exe -NoProfile -ExecutionPolicy Bypass -File '{{ remote_script_dir }}\\{{ ps_script }}' {{ script_args }}"
+      register: run_result
+      async: 0
+      poll: 600
+
+    - name: Fail if script execution returned non-zero
+      ansible.builtin.fail:
+        msg: "Remote script failed: rc={{ run_result.rc }}, stderr={{ run_result.stderr | default('none') }}"
+      when:
+        - run_result is defined
+        - run_result.rc is defined
+        - run_result.rc != 0
+
+    - name: Ensure local fetch dir exists for this host
+      local_action:
+        module: file
+        path: "{{ local_fetch_base }}/{{ inventory_hostname }}"
+        state: directory
+
+    - name: Fetch output zip if present (WinRecon_*.zip)
+      ansible.builtin.fetch:
+        src: "{{ remote_output_dir }}\\WinRecon_*.zip"
+        dest: "{{ local_fetch_base }}/{{ inventory_hostname }}/"
+        flat: yes
+      ignore_errors: yes
+
+    - name: Fetch JSON report (if present)
+      ansible.builtin.fetch:
+        src: "{{ remote_output_dir }}\\winrecon_report.json"
+        dest: "{{ local_fetch_base }}/{{ inventory_hostname }}/winrecon_report_{{ inventory_hostname }}.json"
+        flat: yes
+      ignore_errors: yes
+
+    - name: Fetch human-readable summary (if present)
+      ansible.builtin.fetch:
+        src: "{{ remote_output_dir }}\\winrecon_summary.txt"
+        dest: "{{ local_fetch_base }}/{{ inventory_hostname }}/winrecon_summary_{{ inventory_hostname }}.txt"
+        flat: yes
+      ignore_errors: yes
+
+    - name: (Optional) Clean up remote output directory
+      ansible.windows.win_file:
+        path: "{{ remote_output_dir }}"
+        state: absent
+      when: false
